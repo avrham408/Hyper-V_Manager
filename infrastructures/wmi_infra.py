@@ -86,7 +86,7 @@ def change_vm_state(client: wmi.WMI, vm_name: str, state: VmState) ->  wmi._wmi_
 		if __handle_job_response(client, job_res):
 			return vm
 	else:
-		raise infra_exceptions.ChangeVmStateError
+		raise infra_exceptions.ChangeVmStateError(f"RequestStateChange for vm {vm_name} returned with code {res_code}")
 
 
 def get_vms(client: wmi.WMI,  vm_name=None) -> list:
@@ -98,8 +98,9 @@ def get_vms(client: wmi.WMI,  vm_name=None) -> list:
 		"state": VmState(machine.EnabledState).name,
 		"cpu_usage": machine.NumberOfProcessors,
 		"memory_usage": machine.MemoryUsage,
-		"up_time": datetime.timedelta(milliseconds= int(machine.UpTime))}
-		vms_data.append(machines)
+		"up_time": datetime.timedelta(milliseconds= int(machine.UpTime)),
+		"wmi_object": machine}
+		vms_data.append(machine_data)
 	return vms_data
 
 
@@ -134,12 +135,8 @@ def __parse_instance_id(job_res: str) -> str:
     return instanse_id
 
 
-
 def __get_specific_vm(list_of_wmi_objects, vm_name) -> wmi._wmi_object:
 	for vm_obj in list_of_wmi_objects:
 		if vm_obj.ElementName == vm_name:
 			return vm_obj
 	raise infra_exceptions.VmNotFoundError
-
-
-

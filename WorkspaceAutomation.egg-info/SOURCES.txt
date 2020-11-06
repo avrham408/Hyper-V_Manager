@@ -1,0 +1,9 @@
+setup.py
+WorkspaceAutomation.egg-info/PKG-INFO
+WorkspaceAutomation.egg-info/SOURCES.txt
+WorkspaceAutomation.egg-info/dependency_links.txt
+WorkspaceAutomation.egg-info/top_level.txt
+infrastructures/__init__.py
+infrastructures/infra_exceptions.py
+infrastructures/manage_vm.py
+infrastructures/wmi_infra.py

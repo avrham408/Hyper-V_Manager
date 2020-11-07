@@ -19,3 +19,15 @@ class JobNotFoundError(Exception):
 
 class ConnectToWmiError(Exception):
 	pass
+
+
+class WmiQueryError(Exception):
+	pass
+
+
+class ModifyVmError(Exception):
+	pass
+
+
+class ServiceNotExist(Exception):
+	pass

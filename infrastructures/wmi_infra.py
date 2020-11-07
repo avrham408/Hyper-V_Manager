@@ -4,6 +4,9 @@ import pywintypes
 from infrastructures import infra_exceptions
 import time
 import datetime
+import platform
+
+HOST_NAME = platform.uname()[1]
 
 
 class VmState(Enum):
@@ -55,10 +58,30 @@ class JobState(Enum):
 	Job_Exception = 10  # The job is in an abnormal state that might be indicative of an error condition. The actual status of the job might be available through job-specific objects.
 	Service = 11  # The job is in a vendor-specific state that supports problem discovery, or resolution, or both.
 
-
 	@classmethod
 	def list_of_values(cls, list_of_attr):
 		return [cls.__getattr__(att).value for att in list_of_attr]
+
+
+class MemoryChangeRc(Enum):
+	Completed = 0 #Completed with No Error 
+	Not_Supported = 1 
+	Failed = 2
+	Timeout = 3
+	Invalid_Parameter = 4
+	Invalid_State = 5
+	Incompatible = 6
+	Job_Started = 4096
+
+
+SERVICE_COMPONENTS =  { 
+	"ShutDown": "Msvm_ShutdownComponentSettingData",
+	"TimeSync": "Msvm_TimeSyncComponentSettingData", 
+	"DataExchange": "Msvm_KvpExchangeComponentSettingData",
+	"Backup": "Msvm_VssComponentSettingData",  # Shadow Copy Service
+	"GuestServices": "Msvm_GuestServiceInterfaceComponentSettingData",
+	"Hearybeat": "Msvm_HeartbeatComponentSettingData",
+}
 
 
 def connect_to_wmi(server: str, namespace: str) -> wmi.WMI:
@@ -71,44 +94,100 @@ def connect_to_wmi(server: str, namespace: str) -> wmi.WMI:
 
 
 def change_vm_state(client: wmi.WMI, vm_name: str, state: VmState) ->  wmi._wmi_object:
-	try:
-		computer_systems = client.Msvm_ComputerSystem()
-		if not computer_systems:
-			#log Msvm_ComputerSystem return empty list
-			return False
-	except AttributeError:
-		#log connect to wmi failed
-		return False
-	vm = __get_specific_vm(computer_systems, vm_name)
-	job_res, res_code = vm.RequestStateChange(state)
-	if res_code == 4096: #asyn start
+	vm = __get_vm_object(client, vm_name)
+	job_res, rc = vm.RequestStateChange(state)
+	if rc == RequestedStateRes.Transition_Started.value: #asyn start
 		#check_if_job_succced
 		if __handle_job_response(client, job_res):
 			return vm
 	else:
-		raise infra_exceptions.ChangeVmStateError(f"RequestStateChange for vm {vm_name} returned with code {res_code}")
+		raise infra_exceptions.ChangeVmStateError(f"RequestStateChange for vm {vm_name} returned with code {rc}")
 
 
 def get_vms(client: wmi.WMI,  vm_name=None) -> list:
 	vms_data = list()
-	machines = client.Msvm_SummaryInformation()
-	for machine in machines:
-		machine_data = {
-		"name": machine.ElementName,
-		"state": VmState(machine.EnabledState).name,
-		"cpu_usage": machine.NumberOfProcessors,
-		"memory_usage": machine.MemoryUsage,
-		"up_time": datetime.timedelta(milliseconds= int(machine.UpTime)),
-		"wmi_object": machine}
-		vms_data.append(machine_data)
+	if vm_name == None:
+		machines = client.Msvm_SummaryInformation()
+		for machine in machines:
+			vms_data.append(__create_vm_data(machine))
+	else:
+		machine = client.Msvm_SummaryInformation(ElementName=vm_name)
+		if not machine:
+			raise infra_exceptions.VmNotFoundError
+		vms_data.append(__create_vm_data(machine))
 	return vms_data
 
 
+def __create_vm_data(machine: wmi._wmi_object):
+	machine_data = {
+		"name": machine.ElementName,
+		"state": VmState(machine.EnabledState).name,
+		"cpu_assigned": machine.NumberOfProcessors,
+		"memory_usage": machine.MemoryUsage,
+		"up_time": datetime.timedelta(milliseconds= int(machine.UpTime)),
+		"wmi_object": machine}
+	return machine_data
+
+
+
+def set_vm_memory(client: wmi.WMI,  vm_name: str, ram: int, dynamic=None) -> bool: 
+	# Ram in MB, v';.m memory can change only if the machine is off
+	vm_mem_setting = __get_setting_data(client, vm_name, "Msvm_MemorySettingData")
+	if ram % 2 != 0:
+		raise infra_exceptions.ModifyVmError("Ram can be only even number")
+	vm_mem_setting.VirtualQuantity = str(ram)
+	if dynamic != None:
+		vm_mem_setting.DynamicMemoryEnabled = dynamic
+
+	mgmsv = client.Msvm_VirtualSystemManagementService()[0]
+	job, res_resource_setting, rc = mgmsv.ModifyResourceSettings(ResourceSettings=[vm_mem_setting.GetText_(1)])
+	if rc == MemoryChangeRc.Completed.value:
+		return True
+	elif rc == MemoryChangeRc.Job_Started.value:
+		return __handle_job_response(client, job)  # use only for raise the error-exception from windows(if job failed but return with Completed rc it's can be bug)  
+	else:
+		raise infra_exceptions.ModifyVmError(f"change memory return with rc {rc} name = {MemoryChangeRc(rc).name}")
+
+
+def set_vm_service(client: wmi.WMI, vm_name: str,service_name: str, enable:bool) -> bool:
+	service = SERVICE_COMPONENTS.get(service_name)
+	if service is None:
+		raise infra_exceptions.ServiceNotExist(f"service - {service_name} is not exist")
+	vm_service_setting = __get_setting_data(client, vm_name, service)
+	vm_service_setting.EnabledState = "2" if enable else "3"
+	mgmsv = client.Msvm_VirtualSystemManagementService()[0]
+	jop, res, rc = mgmsv.ModifyGuestServiceSettings([vm_service_setting.GetText_(1)])
+	if rc != 0:
+		raise ModifyVmError(f"Modify service {service_name} failed with RC {rc}")
+	return True
+
+
+def get_services_status(client: wmi.WMI, vm_name: str) -> dict:
+	services_status = dict()
+	for service_name in SERVICE_COMPONENTS:
+		status = get_service_status(client, vm_name, service_name)
+		services_status[service_name] = status
+	return services_status
+   
+
+def get_service_status(client:  wmi.WMI, vm_name: str, service_name: str) ->bool:
+	service = SERVICE_COMPONENTS.get(service_name)
+	if service is None:
+		raise infra_exceptions.ServiceNotExist(f"service - {service_name} is not exist")
+	vm_service_setting = __get_setting_data(client, vm_name, service)
+	return True if vm_service_setting.EnabledState is 2 else False
+
+
+def set_all_services_on(client: wmi.WMI, vm_name: str):
+	for service_name in SERVICE_COMPONENTS:
+		set_vm_service(client, vm_name, service_name, True)
+
+
 def __handle_job_response(client: wmi.WMI, job_res: str) -> bool:
-	instanse_id = __parse_instance_id(job_res)
-	job = client.Msvm_ConcreteJob(InstanceID=instanse_id)[0]
+	instance_id = __parse_instance_id(job_res)
+	job = client.Msvm_ConcreteJob(InstanceID=instance_id)[0]
 	if not job:
-		raise infra_exceptions.JobNotFoundError(instanse_id)
+		raise infra_exceptions.JobNotFoundError(instance_id)
 	if int(job.JobState) in JobState.list_of_values(["New", "Starting", "Running", "Suspended"]):
 		time.sleep(0.5)
 		#log the status
@@ -123,20 +202,47 @@ def __handle_job_response(client: wmi.WMI, job_res: str) -> bool:
 	elif job.JobState == JobState.Completed.value:
 		return True
 
-	raise Exception("somthing crazy happend!!!")
+	raise NotImplementedError(f"JobState returned with rc - {job.JobState} {JobState(job.JobState).name}")  #support in future if relevant
 
 
 def __parse_instance_id(job_res: str) -> str:
-    #instanse_id len is 36 chars.
+    #instance_id len is 36 chars.
     size = len(job_res)
-    instanse_id = job_res[size - 37:size - 1]
-    if len(instanse_id) != 36:
-        raise infra_exceptions.ParseInstanseIdError
-    return instanse_id
+    instance_id = job_res[size - 37:size - 1]
+    if len(instance_id) != 36:
+        raise infra_exceptions.ParseinstanceIdError
+    return instance_id
 
 
-def __get_specific_vm(list_of_wmi_objects, vm_name) -> wmi._wmi_object:
-	for vm_obj in list_of_wmi_objects:
-		if vm_obj.ElementName == vm_name:
-			return vm_obj
+def __get_vm_object(client: wmi.WMI, vm_name: str) -> wmi._wmi_object:
+	try:
+		vm_obj = client.Msvm_ComputerSystem(ElementName=vm_name)
+		if not vm_obj:
+			#log Msvm_ComputerSystem return empty list
+			raise infra_exceptions.VmNotFoundError(f"Vm {vm_name} not found")
+		return vm_obj[0]
+	except AttributeError:
+		#log connect to wmi failed
+		raise infra_exceptions.WmiQueryError("Msvm_ComputerSystem query failed")
+
+
+def __get_vm_id(client: wmi.WMI, vm_name: str):
+	return __get_vm_object(client, vm_name).Name
+
+
+def __get_setting_data(client: wmi.WMI, vm_name: str, setting_data_type):
+	vm_id = __get_vm_id(client, vm_name)
+	for memory_data_setting in client.__getattr__(setting_data_type)():
+		if vm_id in memory_data_setting.InstanceID:
+			return memory_data_setting
 	raise infra_exceptions.VmNotFoundError
+	
+
+
+
+
+		
+
+if __name__ == "__main__":
+	client = connect_to_wmi(HOST_NAME, r"root\virtualization\v2")
+	set_vm_memory(client, "202H", 5000)

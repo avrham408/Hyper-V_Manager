@@ -1,2 +1,2 @@
 1. set logging
-2 . 
+2 . add checkpoint

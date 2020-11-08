@@ -5,9 +5,11 @@ from infrastructures import infra_exceptions
 import time
 import datetime
 import platform
+import logging
+from infrastructures import log_config
 
 HOST_NAME = platform.uname()[1]
-
+logger = logging.getLogger(__name__)
 
 class VmState(Enum):
 	Other = 1                    
@@ -37,6 +39,9 @@ class VmState(Enum):
 	ResumingCritical = 32790     
 	FastSavedCritical = 32791    
 	FastSavingCritical = 32792
+
+
+
 
 
 class RequestedStateRes(Enum):
@@ -74,6 +79,15 @@ class MemoryChangeRc(Enum):
 	Job_Started = 4096
 
 
+class HeartBeatStatus(Enum):
+	OK = 2  # The service is operating normally
+	Degraded = 3  # The service is operating normally, but the guest service negotiated a compatible communications protocol version
+	Non_RecoverableError = 7  # the guest does not support a compatible protocol version
+	No_Contact = 12  # The guest service is not installed or has not yet been contacted
+	Lost_Communication = 13  # The guest service is no longer responding normally
+	Paused = 15  #  The virtual machine is paused
+
+
 SERVICE_COMPONENTS =  { 
 	"ShutDown": "Msvm_ShutdownComponentSettingData",
 	"TimeSync": "Msvm_TimeSyncComponentSettingData", 
@@ -95,7 +109,7 @@ def connect_to_wmi(server: str, namespace: str) -> wmi.WMI:
 
 def change_vm_state(client: wmi.WMI, vm_name: str, state: VmState) ->  wmi._wmi_object:
 	vm = __get_vm_object(client, vm_name)
-	job_res, rc = vm.RequestStateChange(state)
+	job_res, rc = vm.RequestStateChange(state.value)
 	if rc == RequestedStateRes.Transition_Started.value: #asyn start
 		#check_if_job_succced
 		if __handle_job_response(client, job_res):
@@ -170,7 +184,7 @@ def get_services_status(client: wmi.WMI, vm_name: str) -> dict:
 	return services_status
    
 
-def get_service_status(client:  wmi.WMI, vm_name: str, service_name: str) ->bool:
+def get_service_status(client:  wmi.WMI, vm_name: str, service_name: str) -> bool:
 	service = SERVICE_COMPONENTS.get(service_name)
 	if service is None:
 		raise infra_exceptions.ServiceNotExist(f"service - {service_name} is not exist")
@@ -181,6 +195,40 @@ def get_service_status(client:  wmi.WMI, vm_name: str, service_name: str) ->bool
 def set_all_services_on(client: wmi.WMI, vm_name: str):
 	for service_name in SERVICE_COMPONENTS:
 		set_vm_service(client, vm_name, service_name, True)
+
+
+def wait_for_heart_beat(client: wmi.WMI, vm_name: str, seconds=90) -> bool:
+	logger.debug(f"[{vm_name}] wait for heart_beat")
+	vm_id = __get_vm_id(client, vm_name)
+	interval = 2
+	start_time = time.time()
+	elapsed_time = time.time() - start_time
+	while elapsed_time < seconds:
+		time.sleep(interval)
+		elapsed_time = time.time() - start_time
+
+		try:
+			status = __get_heart_beat(client, vm_id)  # type - HeartBeatStatus
+		except infra_exceptions.HeartBeatError:
+			logger.warning(f"[{vm_name}] didn't turned on")
+			return False
+		if status == HeartBeatStatus.OK:
+			logger.debug(f"[{vm_name}] heart beat returned:'ok'")
+			return True
+		elif status == HeartBeatStatus.No_Contact:
+			logger.debug(f"[{vm_name}] still wait for heart beat {elapsed_time} seconds")
+			interval += 1
+		else:
+			#Todo support pause and lost communication
+			raise NotImplementedError("heart beat not support pause and lost communication yet")
+	return False
+
+
+def __get_heart_beat(client: wmi.WMI, vm_id: str) -> HeartBeatStatus:
+	heart_beat = client.Msvm_HeartbeatComponent(SystemName=vm_id)  # return tuple with int inside
+	if not heart_beat:
+		raise infra_exceptions.HeartBeatError(f"Heart beat for {vm_id} not found")
+	return HeartBeatStatus(heart_beat[0].OperationalStatus[0])
 
 
 def __handle_job_response(client: wmi.WMI, job_res: str) -> bool:

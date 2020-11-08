@@ -31,3 +31,7 @@ class ModifyVmError(Exception):
 
 class ServiceNotExist(Exception):
 	pass
+
+
+class HeartBeatError(Exception):
+	pass

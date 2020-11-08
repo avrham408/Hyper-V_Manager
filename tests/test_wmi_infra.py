@@ -4,6 +4,7 @@ import wmi
 import pytest
 from infrastructures import infra_exceptions
 import sys
+import time
 
 HOST_NAME = platform.uname()[1]
 
@@ -35,17 +36,17 @@ def test_change_vm_state():
 	vms = client.Msvm_ComputerSystem(Description = "Microsoft Virtual Machine")
 	for vm_data in vms:
 		vm_name = vm_data.ElementName
-		vm = wmi_infra.change_vm_state(client, vm_name, wmi_infra.VmState.Enabled.value)
+		vm = wmi_infra.change_vm_state(client, vm_name, wmi_infra.VmState.Enabled)
 		assert vm != None
 		assert client.Msvm_ComputerSystem(ElementName=vm_name)[0].EnabledState == 2
-		wmi_infra.change_vm_state(client, vm_name, wmi_infra.VmState.Disabled.value)
+		wmi_infra.change_vm_state(client, vm_name, wmi_infra.VmState.Disabled)
 		assert client.Msvm_ComputerSystem(ElementName=vm_name)[0].EnabledState == 3
 
 
 def test_change__vm_state_for_not_exist_vm():
 	client = wmi_infra.connect_to_wmi(HOST_NAME, r"root\virtualization\v2")
 	with pytest.raises(infra_exceptions.VmNotFoundError):
-		wmi_infra.change_vm_state(client, "blabla", wmi_infra.VmState.Enabled.value)
+		wmi_infra.change_vm_state(client, "blabla", wmi_infra.VmState.Enabled)
 
 
 def test_get_vms_all_vms_types():
@@ -86,5 +87,20 @@ def test_set_all_services_on():
 			assert status is True
 		
 
+def test_wait_for_heart_beat():
+	client = wmi_infra.connect_to_wmi(HOST_NAME, r"root\virtualization\v2")
+	vms = client.Msvm_ComputerSystem(Description = "Microsoft Virtual Machine")
+	for vm in vms:
+		vm_name = vm.ElementName
+		try:
+			wmi_infra.change_vm_state(client, vm_name, wmi_infra.VmState.Enabled)
+		except infra_exceptions.ChangeVmStateError:
+			wmi_infra.change_vm_state(client, vm_name, wmi_infra.VmState.Disabled)
+			wmi_infra.change_vm_state(client, vm_name, wmi_infra.VmState.Enabled)
+		time.sleep(0.2)
+		assert wmi_infra.wait_for_heart_beat(client, vm_name)
+		wmi_infra.change_vm_state(client, vm_name, wmi_infra.VmState.Disabled)
+
+
 if __name__ == "__main__":
-	test_set_all_services_on()
+	test_wait_for_heart_beat()
